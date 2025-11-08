@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tasky
+  labels:
+    app: tasky
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tasky
+  template:
+    metadata:
+      labels:
+        app: tasky
+    spec:
+      containers:
+        - name: tasky
+          image: 122610499688.dkr.ecr.us-east-1.amazonaws.com/tasky:latest
+          ports:
+            - containerPort: 8080
+          env:
+            # cover common mongo env names
+            - name: MONGO_URI
+              value: mongodb://44.201.26.22:27017
+            - name: MONGODB_URI
+              value: mongodb://44.201.26.22:27017
+            - name: MONGO_URL
+              value: mongodb://44.201.26.22:27017
+            - name: DATABASE_URL
+              value: mongodb://44.201.26.22:27017
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tasky
+spec:
+  type: LoadBalancer
+  selector:
+    app: tasky
+  ports:
+    - port: 80
+      targetPort: 8080
