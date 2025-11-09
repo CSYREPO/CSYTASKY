@@ -21,25 +21,39 @@ pipeline {
         stage('Build Docker image') {
             steps {
                 sh """
-                  docker build -t tasky:latest .
-                  docker tag tasky:latest ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
+                  docker build -t tasky:${IMAGE_TAG} .
+                  docker tag tasky:${IMAGE_TAG} ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
                 """
             }
         }
 
-        stage('Trivy Scan (non-blocking)') {
+        stage('Trivy Scan (blocking)') {
             steps {
                 sh """
                   mkdir -p ${TRIVY_CACHE}
 
-                  # run trivy but don't fail build
+                  # 1) Human-readable report (non-blocking, for archive)
+                  docker run --rm \
+                    -v ${TRIVY_CACHE}:/root/.cache/ \
+                    -v /var/run/docker.sock:/var/run/docker.sock \
+                    -v \$(pwd):/report \
+                    aquasec/trivy:latest image \
+                    --severity HIGH,CRITICAL \
+                    --ignore-unfixed \
+                    --format table \
+                    --output /report/trivy-report.txt \
+                    --exit-code 0 \
+                    --no-progress \
+                    ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
+
+                  # 2) Blocking scan - fail if any HIGH/CRITICAL vuln found
                   docker run --rm \
                     -v ${TRIVY_CACHE}:/root/.cache/ \
                     -v /var/run/docker.sock:/var/run/docker.sock \
                     aquasec/trivy:latest image \
                     --severity HIGH,CRITICAL \
                     --ignore-unfixed \
-                    --exit-code 0 \
+                    --exit-code 1 \
                     --no-progress \
                     ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
                 """
@@ -47,6 +61,9 @@ pipeline {
         }
 
         stage('Login to ECR & Push') {
+            when {
+                expression { currentBuild.resultIsBetterOrEqualTo('SUCCESS') }
+            }
             steps {
                 sh """
                   aws ecr get-login-password --region ${AWS_REGION} | \
@@ -58,6 +75,9 @@ pipeline {
         }
 
         stage('Deploy to EKS') {
+            when {
+                expression { currentBuild.resultIsBetterOrEqualTo('SUCCESS') }
+            }
             steps {
                 sh """
                   aws eks update-kubeconfig --region ${AWS_REGION} --name ${CLUSTER_NAME}
@@ -70,7 +90,14 @@ pipeline {
     }
 
     post {
+        success {
+            echo "✅ Trivy found no HIGH/CRITICAL vulns — build allowed to deploy."
+        }
+        failure {
+            echo "❌ Trivy found HIGH/CRITICAL vulns — build blocked!"
+        }
         always {
+            archiveArtifacts artifacts: 'trivy-report.txt', fingerprint: true
             sh 'docker image ls | grep tasky || true'
         }
     }
