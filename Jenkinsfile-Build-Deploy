@@ -10,10 +10,10 @@ pipeline {
   }
 
   stages {
-    stage('Checkout') {
+    stage('Checkout Code') {
       steps {
-        // change this if your actual repo is CSYTASKY, but leaving as-is for now
-        git branch: 'main', url: 'https://github.com/CSYREPO/tasky.git'
+        // ✅ this is the ONLY checkout we need
+        git branch: 'main', url: 'https://github.com/CSYREPO/CSYTASKY.git'
       }
     }
 
@@ -40,13 +40,11 @@ pipeline {
     stage('Deploy to EKS') {
       steps {
         sh '''
-        # configure kube access on this Jenkins EC2
         aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
 
-        # apply the single manifest you have
+        # now this file actually exists in THIS repo
         kubectl apply -f k8s/tasky.yaml
 
-        # show what got deployed
         kubectl get pods -n tasky
         kubectl get svc -n tasky
         '''
