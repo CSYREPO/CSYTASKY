@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: tasky
+  namespace: tasky
   labels:
     app: tasky
 spec:
@@ -15,25 +16,41 @@ spec:
         app: tasky
     spec:
       containers:
-        - name: tasky
+        - name: tasky-api
           image: 122610499688.dkr.ecr.us-east-1.amazonaws.com/tasky:latest
           ports:
             - containerPort: 8080
           env:
-            # cover common mongo env names
+            # Mongo connection (update to match your Mongo EC2 private IP if using internal access)
             - name: MONGO_URI
-              value: mongodb://44.201.26.22:27017
+              value: mongodb://10.77.2.76:27017
             - name: MONGODB_URI
-              value: mongodb://44.201.26.22:27017
+              value: mongodb://10.77.2.76:27017
             - name: MONGO_URL
-              value: mongodb://44.201.26.22:27017
+              value: mongodb://10.77.2.76:27017
             - name: DATABASE_URL
-              value: mongodb://44.201.26.22:27017
+              value: mongodb://10.77.2.76:27017
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: tasky
+  namespace: tasky
+  labels:
+    app: tasky
 spec:
   type: LoadBalancer
   selector:
@@ -41,3 +58,5 @@ spec:
   ports:
     - port: 80
       targetPort: 8080
+
+
