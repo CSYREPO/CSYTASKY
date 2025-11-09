@@ -20,28 +20,36 @@ pipeline {
 
         stage('IaC Scan (Checkov)') {
             steps {
+                echo "🔍 Running Checkov IaC scan on Terraform code..."
                 sh """
                   mkdir -p checkov-report
+
+                  # Run Checkov scan and output both JSON and readable text
                   docker run --rm \
                     -v \$PWD:/workspace \
                     bridgecrew/checkov:latest \
                     --directory /workspace/infra \
                     --output json \
                     --soft-fail \
-                    --output-file-path /workspace/checkov-report/checkov-results.json
+                    --output-file-path /workspace/checkov-report/checkov-report.json
 
                   docker run --rm \
                     -v \$PWD:/workspace \
                     bridgecrew/checkov:latest \
                     --directory /workspace/infra \
                     --output cli \
-                    --soft-fail
+                    --soft-fail \
+                    --output-file-path /workspace/checkov-report/checkov-report.txt
+
+                  echo "✅ Checkov scan complete. Showing summary:"
+                  cat checkov-report/checkov-report.txt || true
                 """
             }
         }
 
         stage('Build Docker image') {
             steps {
+                echo "🛠️ Building Tasky Docker image..."
                 sh """
                   docker build -t tasky:latest .
                   docker tag tasky:latest ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
@@ -51,6 +59,7 @@ pipeline {
 
         stage('Trivy Scan (non-blocking)') {
             steps {
+                echo "🧪 Running Trivy vulnerability scan on image..."
                 sh """
                   mkdir -p ${TRIVY_CACHE}
                   mkdir -p trivy-report
@@ -67,12 +76,16 @@ pipeline {
                     --exit-code 0 \
                     --no-progress \
                     ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
+
+                  echo "✅ Trivy scan complete. Showing summary:"
+                  cat trivy-report/trivy-report.txt || true
                 """
             }
         }
 
         stage('Login to ECR & Push') {
             steps {
+                echo "📦 Logging in to ECR and pushing image..."
                 sh """
                   aws ecr get-login-password --region ${AWS_REGION} | \
                     docker login --username AWS --password-stdin ${ECR_REGISTRY}
@@ -84,6 +97,7 @@ pipeline {
 
         stage('Deploy to EKS') {
             steps {
+                echo "🚀 Deploying to EKS cluster..."
                 sh """
                   aws eks update-kubeconfig --region ${AWS_REGION} --name ${CLUSTER_NAME}
                   kubectl apply -f ${K8S_MANIFEST}
@@ -96,7 +110,8 @@ pipeline {
 
     post {
         always {
-            archiveArtifacts artifacts: 'checkov-report/checkov-results.json, trivy-report/trivy-report.txt', allowEmptyArchive: true
+            echo "📄 Archiving scan reports..."
+            archiveArtifacts artifacts: 'checkov-report/checkov-report.txt, trivy-report/trivy-report.txt', allowEmptyArchive: true
             sh 'docker image ls | grep tasky || true'
         }
     }
