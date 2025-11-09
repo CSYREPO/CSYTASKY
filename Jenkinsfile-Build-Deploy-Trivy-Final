@@ -20,28 +20,20 @@ pipeline {
 
         stage('IaC Scan (Checkov)') {
             steps {
-                echo "🔍 Running Checkov IaC scan on Terraform code..."
                 sh """
                   mkdir -p checkov-report
 
-                  # Run Checkov scan and output both JSON and readable text
-                  docker run --rm \
-                    -v \$PWD:/workspace \
-                    bridgecrew/checkov:latest \
-                    --directory /workspace/infra \
-                    --output json \
-                    --soft-fail \
-                    --output-file-path /workspace/checkov-report/checkov-report.json
-
-                  docker run --rm \
-                    -v \$PWD:/workspace \
-                    bridgecrew/checkov:latest \
+                  # Run checkov against your IaC dir
+                  docker run --rm -v \$PWD:/workspace bridgecrew/checkov:latest \
                     --directory /workspace/infra \
                     --output cli \
                     --soft-fail \
-                    --output-file-path /workspace/checkov-report/checkov-report.txt
+                    --output-file-path /workspace/checkov-report/checkov-report-raw.txt
 
-                  echo "✅ Checkov scan complete. Showing summary:"
+                  # Strip non-ascii so Jenkins console doesn't show weird boxes
+                  cat checkov-report/checkov-report-raw.txt | tr -cd '\\11\\12\\15\\40-\\176' > checkov-report/checkov-report.txt
+
+                  echo "===== CHECKOV REPORT (clean) ====="
                   cat checkov-report/checkov-report.txt || true
                 """
             }
@@ -49,7 +41,6 @@ pipeline {
 
         stage('Build Docker image') {
             steps {
-                echo "🛠️ Building Tasky Docker image..."
                 sh """
                   docker build -t tasky:latest .
                   docker tag tasky:latest ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
@@ -59,11 +50,11 @@ pipeline {
 
         stage('Trivy Scan (non-blocking)') {
             steps {
-                echo "🧪 Running Trivy vulnerability scan on image..."
                 sh """
                   mkdir -p ${TRIVY_CACHE}
                   mkdir -p trivy-report
 
+                  # 1) run trivy and capture the raw table (which has box chars)
                   docker run --rm \
                     -v ${TRIVY_CACHE}:/root/.cache/ \
                     -v /var/run/docker.sock:/var/run/docker.sock \
@@ -72,12 +63,15 @@ pipeline {
                     --severity HIGH,CRITICAL \
                     --ignore-unfixed \
                     --format table \
-                    --output /report/trivy-report/trivy-report.txt \
+                    --output /report/trivy-report/trivy-report-raw.txt \
                     --exit-code 0 \
                     --no-progress \
                     ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
 
-                  echo "✅ Trivy scan complete. Showing summary:"
+                  # 2) make an ASCII-only version for Jenkins console
+                  cat trivy-report/trivy-report-raw.txt | tr -cd '\\11\\12\\15\\40-\\176' > trivy-report/trivy-report.txt
+
+                  echo "===== TRIVY REPORT (clean) ====="
                   cat trivy-report/trivy-report.txt || true
                 """
             }
@@ -85,11 +79,9 @@ pipeline {
 
         stage('Login to ECR & Push') {
             steps {
-                echo "📦 Logging in to ECR and pushing image..."
                 sh """
                   aws ecr get-login-password --region ${AWS_REGION} | \
                     docker login --username AWS --password-stdin ${ECR_REGISTRY}
-
                   docker push ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
                 """
             }
@@ -97,7 +89,6 @@ pipeline {
 
         stage('Deploy to EKS') {
             steps {
-                echo "🚀 Deploying to EKS cluster..."
                 sh """
                   aws eks update-kubeconfig --region ${AWS_REGION} --name ${CLUSTER_NAME}
                   kubectl apply -f ${K8S_MANIFEST}
@@ -110,8 +101,8 @@ pipeline {
 
     post {
         always {
-            echo "📄 Archiving scan reports..."
-            archiveArtifacts artifacts: 'checkov-report/checkov-report.txt, trivy-report/trivy-report.txt', allowEmptyArchive: true
+            // archive the cleaned-up versions
+            archiveArtifacts artifacts: 'checkov-report/checkov-report.txt,trivy-report/trivy-report.txt', allowEmptyArchive: true
             sh 'docker image ls | grep tasky || true'
         }
     }
