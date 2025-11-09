@@ -1,0 +1,81 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION   = "us-east-1"
+        ECR_REGISTRY = "122610499688.dkr.ecr.us-east-1.amazonaws.com"
+        ECR_REPO     = "tasky"
+        IMAGE_TAG    = "latest"
+        CLUSTER_NAME = "tasky-wiz-eks"
+        K8S_MANIFEST = "k8s/tasky.yaml"
+        TRIVY_CACHE  = "/var/lib/jenkins/trivy-cache"
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                git branch: 'main', url: 'https://github.com/CSYREPO/CSYTASKY.git'
+            }
+        }
+
+        stage('Build Docker image') {
+            steps {
+                sh """
+                  docker build -t tasky:${IMAGE_TAG} .
+                  docker tag tasky:${IMAGE_TAG} ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
+                """
+            }
+        }
+
+        stage('Trivy Scan (non-blocking)') {
+            steps {
+                sh """
+                  mkdir -p ${TRIVY_CACHE}
+
+                  # run trivy but don't fail build
+                  docker run --rm \
+                    -v ${TRIVY_CACHE}:/root/.cache/ \
+                    -v /var/run/docker.sock:/var/run/docker.sock \
+                    aquasec/trivy:latest image \
+                    --severity HIGH,CRITICAL \
+                    --ignore-unfixed \
+                    --format table \
+                    --output trivy-report.txt \
+                    --exit-code 0 \
+                    --no-progress \
+                    ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
+                """
+                archiveArtifacts artifacts: 'trivy-report.txt', fingerprint: true
+            }
+        }
+
+        stage('Login to ECR & Push') {
+            steps {
+                sh """
+                  aws ecr get-login-password --region ${AWS_REGION} | \
+                    docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+                  docker push ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
+                """
+            }
+        }
+
+        stage('Deploy to EKS') {
+            steps {
+                sh """
+                  aws eks update-kubeconfig --region ${AWS_REGION} --name ${CLUSTER_NAME}
+                  kubectl apply -f ${K8S_MANIFEST}
+                  kubectl get pods -n tasky
+                  kubectl get svc -n tasky
+                """
+            }
+        }
+    }
+
+    post {
+        always {
+            sh 'docker image ls | grep tasky || true'
+        }
+    }
+}
+
