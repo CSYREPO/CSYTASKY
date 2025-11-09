@@ -1,0 +1,83 @@
+pipeline {
+  agent any
+
+  environment {
+    AWS_REGION    = "us-east-1"
+    ECR_REGISTRY  = "122610499688.dkr.ecr.us-east-1.amazonaws.com"
+    ECR_REPO      = "tasky"
+    IMAGE_TAG     = "latest"
+    EKS_CLUSTER   = "tasky-wiz-eks"
+  }
+
+  stages {
+
+    stage('Checkout Code') {
+      steps {
+        // ✅ single checkout
+        git branch: 'main', url: 'https://github.com/CSYREPO/CSYTASKY.git'
+      }
+    }
+
+    stage('IaC Scan (Checkov - non blocking)') {
+      steps {
+        script {
+          // run checkov in docker, but don't fail the build
+          def rc = sh(
+            returnStatus: true,
+            script: '''
+              mkdir -p checkov-report
+
+              # run checkov against the terraform in this repo
+              docker run --rm \
+                -v $WORKSPACE:/workspace \
+                bridgecrew/checkov:latest \
+                --directory /workspace/terraform \
+                --output cli \
+                --soft-fail | tee checkov-report/checkov-report.txt
+            '''
+          )
+
+          if (rc != 0) {
+            echo "⚠️ Checkov exited with ${rc} — continuing pipeline anyway."
+          }
+        }
+        // save whatever we got
+        archiveArtifacts artifacts: 'checkov-report/**', fingerprint: true, onlyIfSuccessful: false
+      }
+    }
+
+    stage('Build Docker image') {
+      steps {
+        sh '''
+        docker build -t $ECR_REPO:$IMAGE_TAG .
+        docker tag $ECR_REPO:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
+        '''
+      }
+    }
+
+    stage('Login to ECR & Push') {
+      steps {
+        sh '''
+        aws ecr get-login-password --region $AWS_REGION | \
+          docker login --username AWS --password-stdin $ECR_REGISTRY
+
+        docker push $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
+        '''
+      }
+    }
+
+    stage('Deploy to EKS') {
+      steps {
+        sh '''
+        aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
+
+        kubectl apply -f k8s/tasky.yaml
+
+        kubectl get pods -n tasky
+        kubectl get svc -n tasky
+        '''
+      }
+    }
+  }
+}
+
