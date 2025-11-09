@@ -32,15 +32,16 @@ pipeline {
                 sh """
                   mkdir -p ${TRIVY_CACHE}
 
-                  # run trivy but don't fail build
+                  # run trivy and write report into Jenkins workspace
                   docker run --rm \
                     -v ${TRIVY_CACHE}:/root/.cache/ \
                     -v /var/run/docker.sock:/var/run/docker.sock \
+                    -v \$(pwd):/report \
                     aquasec/trivy:latest image \
                     --severity HIGH,CRITICAL \
                     --ignore-unfixed \
                     --format table \
-                    --output trivy-report.txt \
+                    --output /report/trivy-report.txt \
                     --exit-code 0 \
                     --no-progress \
                     ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
