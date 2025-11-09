@@ -22,19 +22,24 @@ pipeline {
         stage('IaC Scan (Checkov)') {
             steps {
                 sh """
+                  # start clean so old directories/files don't conflict
+                  rm -rf checkov-report
                   mkdir -p checkov-report
 
-                  # run checkov and capture console output to a file
-                  docker run --rm -v \$PWD:/workspace bridgecrew/checkov:latest \\
-                    --directory /workspace/terraform \\
+                  # run checkov in the repo root (/workspace) so it doesn't complain
+                  docker run --rm \\
+                    -v \$PWD:/workspace \\
+                    -w /workspace \\
+                    bridgecrew/checkov:latest \\
+                    --directory /workspace \\
                     --output cli \\
-                    --soft-fail | tee checkov-report/checkov-report-raw.txt
+                    --soft-fail | tee checkov-report/checkov-cli.txt
 
-                  # make a console-friendly version (strip box chars etc.)
-                  cat checkov-report/checkov-report-raw.txt | tr -cd '\\11\\12\\15\\40-\\176' > checkov-report/checkov-report.txt
+                  # make a console-friendly version (strip weird chars)
+                  cat checkov-report/checkov-cli.txt | tr -cd '\\11\\12\\15\\40-\\176' > checkov-report/checkov-cli-clean.txt
 
                   echo "===== CHECKOV REPORT (clean) ====="
-                  cat checkov-report/checkov-report.txt
+                  cat checkov-report/checkov-cli-clean.txt
                 """
             }
         }
@@ -52,6 +57,7 @@ pipeline {
             steps {
                 sh """
                   mkdir -p ${TRIVY_CACHE}
+                  rm -rf trivy-report
                   mkdir -p trivy-report
 
                   docker run --rm \\
@@ -67,7 +73,6 @@ pipeline {
                     --no-progress \\
                     ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
 
-                  # clean it for Jenkins console
                   cat trivy-report/trivy-report-raw.txt | tr -cd '\\11\\12\\15\\40-\\176' > trivy-report/trivy-report.txt
 
                   echo "===== TRIVY REPORT (clean) ====="
@@ -99,7 +104,7 @@ pipeline {
 
     post {
         always {
-            archiveArtifacts artifacts: 'checkov-report/checkov-report.txt,trivy-report/trivy-report.txt', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'checkov-report/*.txt,trivy-report/*.txt', allowEmptyArchive: true
             sh 'docker image ls | grep tasky || true'
         }
     }
