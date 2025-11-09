@@ -12,6 +12,7 @@ pipeline {
     }
 
     stages {
+
         stage('Checkout Code') {
             steps {
                 git branch: 'main', url: 'https://github.com/CSYREPO/CSYTASKY.git'
@@ -23,18 +24,17 @@ pipeline {
                 sh """
                   mkdir -p checkov-report
 
-                  # Run checkov against your IaC dir
-                  docker run --rm -v \$PWD:/workspace bridgecrew/checkov:latest \
-                    --directory /workspace/infra \
-                    --output cli \
-                    --soft-fail \
-                    --output-file-path /workspace/checkov-report/checkov-report-raw.txt
+                  # run checkov and capture console output to a file
+                  docker run --rm -v \$PWD:/workspace bridgecrew/checkov:latest \\
+                    --directory /workspace/terraform \\
+                    --output cli \\
+                    --soft-fail | tee checkov-report/checkov-report-raw.txt
 
-                  # Strip non-ascii so Jenkins console doesn't show weird boxes
+                  # make a console-friendly version (strip box chars etc.)
                   cat checkov-report/checkov-report-raw.txt | tr -cd '\\11\\12\\15\\40-\\176' > checkov-report/checkov-report.txt
 
                   echo "===== CHECKOV REPORT (clean) ====="
-                  cat checkov-report/checkov-report.txt || true
+                  cat checkov-report/checkov-report.txt
                 """
             }
         }
@@ -54,25 +54,24 @@ pipeline {
                   mkdir -p ${TRIVY_CACHE}
                   mkdir -p trivy-report
 
-                  # 1) run trivy and capture the raw table (which has box chars)
-                  docker run --rm \
-                    -v ${TRIVY_CACHE}:/root/.cache/ \
-                    -v /var/run/docker.sock:/var/run/docker.sock \
-                    -v \$PWD:/report \
-                    aquasec/trivy:latest image \
-                    --severity HIGH,CRITICAL \
-                    --ignore-unfixed \
-                    --format table \
-                    --output /report/trivy-report/trivy-report-raw.txt \
-                    --exit-code 0 \
-                    --no-progress \
+                  docker run --rm \\
+                    -v ${TRIVY_CACHE}:/root/.cache/ \\
+                    -v /var/run/docker.sock:/var/run/docker.sock \\
+                    -v \$PWD:/report \\
+                    aquasec/trivy:latest image \\
+                    --severity HIGH,CRITICAL \\
+                    --ignore-unfixed \\
+                    --format table \\
+                    --output /report/trivy-report/trivy-report-raw.txt \\
+                    --exit-code 0 \\
+                    --no-progress \\
                     ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
 
-                  # 2) make an ASCII-only version for Jenkins console
+                  # clean it for Jenkins console
                   cat trivy-report/trivy-report-raw.txt | tr -cd '\\11\\12\\15\\40-\\176' > trivy-report/trivy-report.txt
 
                   echo "===== TRIVY REPORT (clean) ====="
-                  cat trivy-report/trivy-report.txt || true
+                  cat trivy-report/trivy-report.txt
                 """
             }
         }
@@ -80,8 +79,7 @@ pipeline {
         stage('Login to ECR & Push') {
             steps {
                 sh """
-                  aws ecr get-login-password --region ${AWS_REGION} | \
-                    docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                  aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
                   docker push ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
                 """
             }
@@ -101,7 +99,6 @@ pipeline {
 
     post {
         always {
-            // archive the cleaned-up versions
             archiveArtifacts artifacts: 'checkov-report/checkov-report.txt,trivy-report/trivy-report.txt', allowEmptyArchive: true
             sh 'docker image ls | grep tasky || true'
         }
