@@ -32,7 +32,7 @@ pipeline {
                 sh """
                   mkdir -p ${TRIVY_CACHE}
 
-                  # run trivy inside a container, write reports into Jenkins workspace
+                  # 1) human-readable table
                   docker run --rm \
                     -v ${TRIVY_CACHE}:/root/.cache/ \
                     -v /var/run/docker.sock:/var/run/docker.sock \
@@ -41,8 +41,19 @@ pipeline {
                     --severity HIGH,CRITICAL \
                     --ignore-unfixed \
                     --format table \
-                    --no-color \
                     --output /report/trivy-report.txt \
+                    --exit-code 0 \
+                    --no-progress \
+                    ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
+
+                  # 2) machine-readable json
+                  docker run --rm \
+                    -v ${TRIVY_CACHE}:/root/.cache/ \
+                    -v /var/run/docker.sock:/var/run/docker.sock \
+                    -v \$(pwd):/report \
+                    aquasec/trivy:latest image \
+                    --severity HIGH,CRITICAL \
+                    --ignore-unfixed \
                     --format json \
                     --output /report/trivy-report.json \
                     --exit-code 0 \
