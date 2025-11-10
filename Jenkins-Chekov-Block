@@ -17,14 +17,14 @@ pipeline {
       }
     }
 
-    stage('IaC Scan (Checkov - block on HIGH/CRITICAL)') {
+    stage('IaC Scan (Checkov - block on ANY severity)') {
       steps {
         script {
           sh '''
             set -e
             mkdir -p checkov-report
 
-            # 1) Human-readable scan (doesn't fail the build)
+            # 1) Human-readable scan (doesn't fail the build directly)
             docker run --rm -v $PWD:/workspace bridgecrew/checkov:latest \
               --directory /workspace/infra/terraform \
               --output cli \
@@ -38,7 +38,7 @@ pipeline {
               --soft-fail \
               > checkov-report/checkov-report.json
 
-            # 3) Write a tiny gate script to disk
+            # 3) Gate script: fail on LOW, MEDIUM, HIGH, CRITICAL
             cat > checkov-report/checkov-gate.py << 'PYCODE'
 import json, sys, pathlib
 
@@ -49,19 +49,27 @@ if not report_path.exists():
 
 data = json.load(report_path.open())
 
-failed = []
-for item in data.get("results", {}).get("failed_checks", []):
-    sev = item.get("severity") or item.get("check_severity")
-    if sev and sev.upper() in ("HIGH", "CRITICAL"):
-        failed.append((item.get("check_id"), sev, item.get("resource")))
+failed_checks = data.get("results", {}).get("failed_checks", [])
 
-if failed:
-    print("Blocking build: HIGH/CRITICAL findings detected:")
-    for cid, sev, res in failed:
+# we want to block on anything that has a known severity
+block_levels = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+
+blocked = []
+for item in failed_checks:
+    sev = (item.get("severity") or item.get("check_severity") or "").upper()
+    if sev in block_levels:
+        blocked.append(item)
+
+if blocked:
+    print("Blocking build: findings detected (LOW/MEDIUM/HIGH/CRITICAL):")
+    for item in blocked:
+        cid  = item.get("check_id")
+        res  = item.get("resource")
+        sev  = (item.get("severity") or item.get("check_severity") or "UNKNOWN").upper()
         print(f" - {cid} [{sev}] in {res}")
     sys.exit(1)
 
-print("No HIGH/CRITICAL findings, continuing.")
+print("No LOW/MEDIUM/HIGH/CRITICAL findings, continuing.")
 PYCODE
 
             # 4) Run the gate inside python container; this is what can fail the stage
