@@ -2,17 +2,18 @@ pipeline {
   agent any
 
   environment {
-    AWS_REGION    = "us-east-1"
-    ECR_REGISTRY  = "122610499688.dkr.ecr.us-east-1.amazonaws.com"
-    ECR_REPO      = "tasky"
-    IMAGE_TAG     = "latest"
-    EKS_CLUSTER   = "tasky-wiz-eks"
+    AWS_REGION     = 'us-east-1'
+    ECR_REGISTRY   = '122610499688.dkr.ecr.us-east-1.amazonaws.com'
+    ECR_REPOSITORY = 'tasky'
+    IMAGE_TAG      = 'latest'
   }
 
   stages {
+
     stage('Checkout Code') {
       steps {
-        git branch: 'main', url: 'https://github.com/CSYREPO/CSYTASKY.git'
+        // same repo Jenkins was pulling in the logs
+        git url: 'https://github.com/CSYREPO/CSYTASKY.git', branch: 'main'
       }
     }
 
@@ -23,43 +24,49 @@ pipeline {
             set -e
             mkdir -p checkov-report
 
-            # 1) run checkov once, normal CLI, so you still see it
+            # 1) Human-readable scan (doesn't fail the build)
             docker run --rm -v $PWD:/workspace bridgecrew/checkov:latest \
               --directory /workspace/infra/terraform \
               --output cli \
               --soft-fail \
-            | tee checkov-report/checkov-report-full.txt
+              | tee checkov-report/checkov-report-full.txt
 
-            # 2) run again to JSON so we can inspect severities
+            # 2) JSON scan we will gate on
             docker run --rm -v $PWD:/workspace bridgecrew/checkov:latest \
               --directory /workspace/infra/terraform \
               --output json \
               --soft-fail \
               > checkov-report/checkov-report.json
 
-            # 3) parse JSON and fail if any result has severity HIGH or CRITICAL
-            #    we use a tiny python container so we don't care what's on the agent
-            docker run --rm -v $PWD/checkov-report:/data python:3.11-slim \
-              python - << 'PYCODE'
+            # 3) Write a tiny gate script to disk
+            cat > checkov-report/checkov-gate.py << 'PYCODE'
 import json, sys, pathlib
 
-data = json.load(open("/data/checkov-report.json"))
-failed = []
+report_path = pathlib.Path("/data/checkov-report.json")
+if not report_path.exists():
+    print("checkov-report.json not found, failing gate.")
+    sys.exit(1)
 
-# checkov json structure has "results": {"failed_checks": [...]}
+data = json.load(report_path.open())
+
+failed = []
 for item in data.get("results", {}).get("failed_checks", []):
     sev = item.get("severity") or item.get("check_severity")
     if sev and sev.upper() in ("HIGH", "CRITICAL"):
         failed.append((item.get("check_id"), sev, item.get("resource")))
 
 if failed:
-    print("Blocking: HIGH/CRITICAL findings detected:")
+    print("Blocking build: HIGH/CRITICAL findings detected:")
     for cid, sev, res in failed:
         print(f" - {cid} [{sev}] in {res}")
     sys.exit(1)
 
 print("No HIGH/CRITICAL findings, continuing.")
 PYCODE
+
+            # 4) Run the gate inside python container; this is what can fail the stage
+            docker run --rm -v $PWD/checkov-report:/data python:3.11-slim \
+              python /data/checkov-gate.py
           '''
         }
         archiveArtifacts artifacts: 'checkov-report/*', fingerprint: true
@@ -68,32 +75,42 @@ PYCODE
 
     stage('Build Docker image') {
       steps {
-        sh '''
-          docker build -t $ECR_REPO:$IMAGE_TAG .
-          docker tag $ECR_REPO:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
-        '''
+        script {
+          sh '''
+            docker build -t tasky:latest .
+            docker tag tasky:latest ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}
+          '''
+        }
       }
     }
 
     stage('Login to ECR & Push') {
       steps {
-        sh '''
-          aws ecr get-login-password --region $AWS_REGION | \
-            docker login --username AWS --password-stdin $ECR_REGISTRY
+        script {
+          sh '''
+            aws ecr get-login-password --region ${AWS_REGION} \
+              | docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
-          docker push $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
-        '''
+            docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}
+          '''
+        }
       }
     }
 
     stage('Deploy to EKS') {
       steps {
-        sh '''
-          aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
-          kubectl apply -f k8s/tasky.yaml
-          kubectl get pods -n tasky
-          kubectl get svc -n tasky
-        '''
+        script {
+          sh '''
+            aws eks update-kubeconfig --region ${AWS_REGION} --name tasky-wiz-eks
+
+            # apply your manifests
+            kubectl apply -f k8s/tasky.yaml
+
+            # quick visibility like in the logs
+            kubectl get pods -n tasky
+            kubectl get svc -n tasky
+          '''
+        }
       }
     }
   }
