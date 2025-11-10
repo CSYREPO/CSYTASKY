@@ -10,10 +10,9 @@ pipeline {
   }
 
   stages {
-
     stage('Checkout Code') {
       steps {
-        // ✅ single checkout
+        // single checkout
         git branch: 'main', url: 'https://github.com/CSYREPO/CSYTASKY.git'
       }
     }
@@ -21,27 +20,19 @@ pipeline {
     stage('IaC Scan (Checkov - non blocking)') {
       steps {
         script {
-          // run checkov in docker, but don't fail the build
-          def rc = sh(
-            returnStatus: true,
-            script: '''
-              mkdir -p checkov-report
+          sh '''
+            mkdir -p checkov-report
 
-              # run checkov against the terraform in this repo
-              docker run --rm \
-                -v $WORKSPACE:/workspace \
-                bridgecrew/checkov:latest \
-                --directory /workspace/terraform \
-                --output cli \
-                --soft-fail | tee checkov-report/checkov-report.txt
-            '''
-          )
-
-          if (rc != 0) {
-            echo "⚠️ Checkov exited with ${rc} — continuing pipeline anyway."
-          }
+            # run checkov against the actual path in this repo
+            docker run --rm \
+              -v $WORKSPACE:/workspace \
+              bridgecrew/checkov:latest \
+              --directory /workspace/infra/terraform \
+              --output cli \
+              --soft-fail | tee checkov-report/checkov-report.txt
+          '''
         }
-        // save whatever we got
+        // always save the report even if checkov finds issues
         archiveArtifacts artifacts: 'checkov-report/**', fingerprint: true, onlyIfSuccessful: false
       }
     }
@@ -49,8 +40,8 @@ pipeline {
     stage('Build Docker image') {
       steps {
         sh '''
-        docker build -t $ECR_REPO:$IMAGE_TAG .
-        docker tag $ECR_REPO:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
+          docker build -t $ECR_REPO:$IMAGE_TAG .
+          docker tag $ECR_REPO:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
         '''
       }
     }
@@ -58,10 +49,10 @@ pipeline {
     stage('Login to ECR & Push') {
       steps {
         sh '''
-        aws ecr get-login-password --region $AWS_REGION | \
-          docker login --username AWS --password-stdin $ECR_REGISTRY
+          aws ecr get-login-password --region $AWS_REGION | \
+            docker login --username AWS --password-stdin $ECR_REGISTRY
 
-        docker push $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
         '''
       }
     }
@@ -69,15 +60,13 @@ pipeline {
     stage('Deploy to EKS') {
       steps {
         sh '''
-        aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
-
-        kubectl apply -f k8s/tasky.yaml
-
-        kubectl get pods -n tasky
-        kubectl get svc -n tasky
+          aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
+          kubectl apply -f k8s/tasky.yaml
+          kubectl get pods -n tasky
+          kubectl get svc -n tasky
         '''
       }
     }
   }
 }
-
+`
