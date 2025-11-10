@@ -23,23 +23,46 @@ pipeline {
             set -e
             mkdir -p checkov-report
 
-            # 1) full scan for the console + artifact (non-blocking)
+            # 1) run checkov once, normal CLI, so you still see it
             docker run --rm -v $PWD:/workspace bridgecrew/checkov:latest \
               --directory /workspace/infra/terraform \
               --output cli \
               --soft-fail \
             | tee checkov-report/checkov-report-full.txt
 
-            # 2) gating scan: only high/critical, NO --soft-fail
-            #    if any high/critical fails, this exits 1 and the pipeline stops
+            # 2) run again to JSON so we can inspect severities
             docker run --rm -v $PWD:/workspace bridgecrew/checkov:latest \
               --directory /workspace/infra/terraform \
-              --severity HIGH \
-              --output cli \
-            | tee checkov-report/checkov-report-high.txt
+              --output json \
+              --soft-fail \
+              > checkov-report/checkov-report.json
+
+            # 3) parse JSON and fail if any result has severity HIGH or CRITICAL
+            #    we use a tiny python container so we don't care what's on the agent
+            docker run --rm -v $PWD/checkov-report:/data python:3.11-slim \
+              python - << 'PYCODE'
+import json, sys, pathlib
+
+data = json.load(open("/data/checkov-report.json"))
+failed = []
+
+# checkov json structure has "results": {"failed_checks": [...]}
+for item in data.get("results", {}).get("failed_checks", []):
+    sev = item.get("severity") or item.get("check_severity")
+    if sev and sev.upper() in ("HIGH", "CRITICAL"):
+        failed.append((item.get("check_id"), sev, item.get("resource")))
+
+if failed:
+    print("Blocking: HIGH/CRITICAL findings detected:")
+    for cid, sev, res in failed:
+        print(f" - {cid} [{sev}] in {res}")
+    sys.exit(1)
+
+print("No HIGH/CRITICAL findings, continuing.")
+PYCODE
           '''
         }
-        archiveArtifacts artifacts: 'checkov-report/*.txt', fingerprint: true
+        archiveArtifacts artifacts: 'checkov-report/*', fingerprint: true
       }
     }
 
