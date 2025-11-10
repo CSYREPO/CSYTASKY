@@ -1,0 +1,78 @@
+pipeline {
+  agent any
+
+  environment {
+    AWS_REGION    = "us-east-1"
+    ECR_REGISTRY  = "122610499688.dkr.ecr.us-east-1.amazonaws.com"
+    ECR_REPO      = "tasky"
+    IMAGE_TAG     = "latest"
+    EKS_CLUSTER   = "tasky-wiz-eks"
+  }
+
+  stages {
+    stage('Checkout Code') {
+      steps {
+        git branch: 'main', url: 'https://github.com/CSYREPO/CSYTASKY.git'
+      }
+    }
+
+    stage('IaC Scan (Checkov - block on HIGH/CRITICAL)') {
+      steps {
+        script {
+          sh '''
+            set -e
+            mkdir -p checkov-report
+
+            # 1) full scan for the console + artifact (non-blocking)
+            docker run --rm -v $PWD:/workspace bridgecrew/checkov:latest \
+              --directory /workspace/infra/terraform \
+              --output cli \
+              --soft-fail \
+            | tee checkov-report/checkov-report-full.txt
+
+            # 2) gating scan: only high/critical, NO --soft-fail
+            #    if any high/critical fails, this exits 1 and the pipeline stops
+            docker run --rm -v $PWD:/workspace bridgecrew/checkov:latest \
+              --directory /workspace/infra/terraform \
+              --severity HIGH \
+              --output cli \
+            | tee checkov-report/checkov-report-high.txt
+          '''
+        }
+        archiveArtifacts artifacts: 'checkov-report/*.txt', fingerprint: true
+      }
+    }
+
+    stage('Build Docker image') {
+      steps {
+        sh '''
+          docker build -t $ECR_REPO:$IMAGE_TAG .
+          docker tag $ECR_REPO:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
+        '''
+      }
+    }
+
+    stage('Login to ECR & Push') {
+      steps {
+        sh '''
+          aws ecr get-login-password --region $AWS_REGION | \
+            docker login --username AWS --password-stdin $ECR_REGISTRY
+
+          docker push $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
+        '''
+      }
+    }
+
+    stage('Deploy to EKS') {
+      steps {
+        sh '''
+          aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
+          kubectl apply -f k8s/tasky.yaml
+          kubectl get pods -n tasky
+          kubectl get svc -n tasky
+        '''
+      }
+    }
+  }
+}
+
